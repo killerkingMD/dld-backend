@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, Response
 import requests
 import re
+import html
 
 app = Flask(__name__)
 
@@ -20,17 +21,20 @@ HEADERS = {
 # =========================================================
 # UTILS
 # =========================================================
+def sanitize_filename(name: str) -> str:
+    name = html.unescape(name)
+    name = re.sub(r'[\\/:*?"<>|]', '', name)
+    return name.strip()[:80]
+
+
 def resolve_short_url(url):
     r = requests.get(url, allow_redirects=True, headers=HEADERS, timeout=15)
     return r.url
 
 
 def extract_video_id(url):
-    """
-    Aceita SOMENTE URLs de vídeo
-    """
     if "/photo/" in url or "album" in url:
-        raise Exception("Esse link não é um vídeo (photo/album)")
+        raise Exception("Esse link não é um vídeo")
 
     m = re.search(r"/video/(\d+)", url)
     if not m:
@@ -39,27 +43,35 @@ def extract_video_id(url):
     return m.group(1)
 
 
-def fetch_video_url(video_id):
+def fetch_video_data(video_id):
     """
-    Método estável: resolve direto do HTML
-    (API privada do Kwai quebra constantemente)
+    Extrai:
+    - URL MP4 real
+    - Título real do vídeo
     """
     video_page = f"https://www.kwai.com/@user/video/{video_id}"
 
     r = requests.get(video_page, headers=HEADERS, timeout=20)
-    html = r.text
+    html_data = r.text
 
-    # Busca URLs MP4 reais
+    # ---------- TITLE ----------
+    title_match = re.search(
+        r'"name":"([^"]+)"',
+        html_data
+    )
+    title = sanitize_filename(title_match.group(1)) if title_match else "video_kwai"
+
+    # ---------- MP4 ----------
     matches = re.findall(
         r'(https://[^"]+\.mp4[^"]*)',
-        html
+        html_data
     )
 
     for url in matches:
         if "kwai" in url:
-            return url.replace("\\u002F", "/")
+            return title, url.replace("\\u002F", "/")
 
-    raise Exception("URL MP4 não encontrada no HTML")
+    raise Exception("URL MP4 não encontrada")
 
 
 # =========================================================
@@ -79,14 +91,9 @@ def download():
         if not url:
             return jsonify({"error": "URL ausente"}), 400
 
-        # Resolve encurtado
         final_url = resolve_short_url(url)
-
-        # Valida tipo
         video_id = extract_video_id(final_url)
-
-        # Extrai MP4 real
-        video_url = fetch_video_url(video_id)
+        title, video_url = fetch_video_data(video_id)
 
         # =================================================
         # STREAMING REAL
@@ -107,7 +114,7 @@ def download():
             stream(),
             content_type="video/mp4",
             headers={
-                "Content-Disposition": "attachment; filename=video.mp4",
+                "X-Video-Title": title,
                 "Cache-Control": "no-cache"
             }
         )
